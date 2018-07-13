@@ -146,8 +146,9 @@ func (info *handlerTestInfo) enableCertQuota(e bool) {
 	}
 }
 
-// setupTest creates mock objects and contexts.  Caller should invoke info.mockCtrl.Finish().
-func setupTest(t *testing.T, pemRoots []string, signer crypto.Signer) handlerTestInfo {
+// newHandlerTestInfo creates mock objects and contexts. Caller should invoke
+// info.mockCtrl.Finish().
+func newHandlerTestInfo(t *testing.T, pemRoots []string, signer crypto.Signer, isMirror bool) handlerTestInfo {
 	t.Helper()
 	info := handlerTestInfo{
 		mockCtrl: gomock.NewController(t),
@@ -161,7 +162,7 @@ func setupTest(t *testing.T, pemRoots []string, signer crypto.Signer) handlerTes
 		extKeyUsages:  []x509.ExtKeyUsage{x509.ExtKeyUsageAny},
 	}
 	iOpts := InstanceOptions{Deadline: time.Millisecond * 500, MetricFactory: monitoring.InertMetricFactory{}, RequestLog: new(DefaultRequestLog)}
-	info.li = newLogInfo(0x42, "test", false /* isMirror */, vOpts, info.client, signer, iOpts, fakeTimeSource)
+	info.li = newLogInfo(0x42, "test", isMirror, vOpts, info.client, signer, iOpts, fakeTimeSource)
 
 	for _, pemRoot := range pemRoots {
 		if !info.roots.AppendCertsFromPEM([]byte(pemRoot)) {
@@ -170,6 +171,13 @@ func setupTest(t *testing.T, pemRoots []string, signer crypto.Signer) handlerTes
 	}
 
 	return info
+}
+
+func setupTest(t *testing.T, pemRoots []string, signer crypto.Signer) handlerTestInfo {
+	return newHandlerTestInfo(t, pemRoots, signer, false)
+}
+func setupMirrorTest(t *testing.T, pemRoots []string) handlerTestInfo {
+	return newHandlerTestInfo(t, pemRoots, nil, true)
 }
 
 func (info handlerTestInfo) getHandlers() map[string]AppHandler {
@@ -675,6 +683,118 @@ func TestGetSTH(t *testing.T) {
 			}
 
 			info := setupTest(t, []string{cttestonly.CACertPEM}, signer)
+			info.setRemoteQuotaUser(test.wantQuotaUser)
+			defer info.mockCtrl.Finish()
+
+			srReq := &trillian.GetLatestSignedLogRootRequest{LogId: 0x42}
+			if len(test.wantQuotaUser) != 0 {
+				srReq.ChargeTo = &trillian.ChargeTo{User: []string{test.wantQuotaUser}}
+			}
+			info.client.EXPECT().GetLatestSignedLogRoot(deadlineMatcher(), srReq).Return(test.rpcRsp, test.rpcErr)
+			req, err := http.NewRequest("GET", "http://example.com/ct/v1/get-sth", nil)
+			if err != nil {
+				t.Errorf("Failed to create request: %v", err)
+				return
+			}
+
+			handler := AppHandler{Info: info.li, Handler: getSTH, Name: "GetSTH", Method: http.MethodGet}
+			w := httptest.NewRecorder()
+			handler.ServeHTTP(w, req)
+			if got := w.Code; got != test.want {
+				t.Errorf("GetSTH(%s).Code=%d; want %d", test.descr, got, test.want)
+			}
+			if test.errStr != "" {
+				if body := w.Body.String(); !strings.Contains(body, test.errStr) {
+					t.Errorf("GetSTH(%s)=%q; want to find %q", test.descr, body, test.errStr)
+				}
+				return
+			}
+
+			var rsp ct.GetSTHResponse
+			if err := json.Unmarshal(w.Body.Bytes(), &rsp); err != nil {
+				t.Errorf("Failed to unmarshal json response: %s", w.Body.Bytes())
+				return
+			}
+
+			if got, want := rsp.TreeSize, uint64(25); got != want {
+				t.Errorf("GetSTH(%s).TreeSize=%d; want %d", test.descr, got, want)
+			}
+			if got, want := rsp.Timestamp, uint64(12345); got != want {
+				t.Errorf("GetSTH(%s).Timestamp=%d; want %d", test.descr, got, want)
+			}
+			if got, want := hex.EncodeToString(rsp.SHA256RootHash), "6162636461626364616263646162636461626364616263646162636461626364"; got != want {
+				t.Errorf("GetSTH(%s).SHA256RootHash=%s; want %s", test.descr, got, want)
+			}
+			if got, want := hex.EncodeToString(rsp.TreeHeadSignature), "040300067369676e6564"; got != want {
+				t.Errorf("GetSTH(%s).TreeHeadSignature=%s; want %s", test.descr, got, want)
+			}
+		}()
+	}
+}
+
+func TestGetMirrorSTH(t *testing.T) {
+	var tests = []struct {
+		descr         string
+		rpcRsp        *trillian.GetLatestSignedLogRootResponse
+		rpcErr        error
+		toSign        string // hex-encoded
+		signErr       error
+		want          int
+		wantQuotaUser string
+		errStr        string
+	}{
+		{
+			descr:  "backend-failure",
+			rpcErr: errors.New("backendfailure"),
+			want:   http.StatusInternalServerError,
+			errStr: "backendfailure",
+		},
+		{
+			descr:  "backend-unimplemented",
+			rpcErr: status.Errorf(codes.Unimplemented, "no-such-thing"),
+			want:   http.StatusNotImplemented,
+			errStr: "no-such-thing",
+		},
+		{
+			descr:  "bad-tree-size",
+			rpcRsp: makeGetRootResponseForTest(12345, -50, []byte("abcdabcdabcdabcdabcdabcdabcdabcd")),
+			want:   http.StatusInternalServerError,
+			errStr: "bad tree size",
+		},
+		{
+			descr:  "bad-hash",
+			rpcRsp: makeGetRootResponseForTest(12345, 25, []byte("thisisnot32byteslong")),
+			want:   http.StatusInternalServerError,
+			errStr: "bad hash size",
+		},
+		/*
+			{
+				descr:   "signer-fail",
+				rpcRsp:  makeGetRootResponseForTest(12345, 25, []byte("abcdabcdabcdabcdabcdabcdabcdabcd")),
+				want:    http.StatusInternalServerError,
+				signErr: errors.New("signerfails"),
+				errStr:  "signerfails",
+			},
+			{
+				descr:  "ok",
+				rpcRsp: makeGetRootResponseForTest(12345000000, 25, []byte("abcdabcdabcdabcdabcdabcdabcdabcd")),
+				toSign: "1e88546f5157bfaf77ca2454690b602631fedae925bbe7cf708ea275975bfe74",
+				want:   http.StatusOK,
+			},
+			{
+				descr:         "ok with quota",
+				rpcRsp:        makeGetRootResponseForTest(12345000000, 25, []byte("abcdabcdabcdabcdabcdabcdabcdabcd")),
+				toSign:        "1e88546f5157bfaf77ca2454690b602631fedae925bbe7cf708ea275975bfe74",
+				want:          http.StatusOK,
+				wantQuotaUser: remoteQuotaUser,
+			},
+		*/
+	}
+
+	for _, test := range tests {
+		// Run deferred funcs at the end of each iteration.
+		func() {
+			info := setupMirrorTest(t, []string{cttestonly.CACertPEM})
 			info.setRemoteQuotaUser(test.wantQuotaUser)
 			defer info.mockCtrl.Finish()
 
