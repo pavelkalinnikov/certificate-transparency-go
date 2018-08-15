@@ -102,18 +102,6 @@ func main() {
 		glog.Exitf("Failed to create PreorderedLogClient: %v", err)
 	}
 
-	opts := core.Options{
-		FetcherOptions: scanner.FetcherOptions{
-			BatchSize:     int(cfg.BatchSize),
-			ParallelFetch: *ctFetchers,
-			StartIndex:    cfg.StartIndex,
-			EndIndex:      cfg.EndIndex,
-			Continuous:    cfg.IsContinuous,
-		},
-		Submitters:          *submitters,
-		BatchesPerSubmitter: *submitterBatches,
-	}
-
 	// Handle metrics on the DefaultServeMux.
 	http.Handle("/metrics", promhttp.Handler())
 	go func() {
@@ -121,17 +109,38 @@ func main() {
 		glog.Fatalf("http.ListenAndServe(): %v", err)
 	}()
 
-	mf := prometheus.MetricFactory{}
 	ef, closeFn := getElectionFactory()
 	defer closeFn()
-	ctrl := core.NewController(opts, ctClient, plClient, ef, mf)
+	rtOpts := core.RuntimeOptions{
+		Submitters:    *submitters,
+		SubmittersBuf: *submitters * *submitterBatches,
+	}
+	rt, err := core.NewRuntime(ef, rtOpts)
+	if err != nil {
+		glog.Exitf("NewRuntime(): %v", err)
+	}
+
+	mf := prometheus.MetricFactory{}
+	super := core.NewSuperController(mf)
+
+	// TODO(pavelkalinnikov): Make the config multi-tenant.
+	opts := scanner.FetcherOptions{
+		BatchSize: int(cfg.BatchSize),
+		// TODO(pavelkalinnikov): ctFetchers should be in cfg as well.
+		ParallelFetch: *ctFetchers,
+		StartIndex:    cfg.StartIndex,
+		EndIndex:      cfg.EndIndex,
+		Continuous:    cfg.IsContinuous,
+	}
+	ctrl := core.NewController(opts, ctClient, plClient, mf)
+	super.Add(ctrl)
 
 	cctx, cancel = context.WithCancel(ctx)
 	defer cancel()
 	go util.AwaitSignal(cctx, cancel)
 
-	if err := ctrl.RunWhenMaster(cctx); err != nil {
-		glog.Exitf("Controller.RunWhenMaster() returned: %v", err)
+	if err := super.Run(cctx, rt); err != nil {
+		glog.Exitf("SuperController.Run() returned: %v", err)
 	}
 }
 

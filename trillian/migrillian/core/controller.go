@@ -27,7 +27,6 @@ import (
 	ct "github.com/google/certificate-transparency-go"
 	"github.com/google/certificate-transparency-go/client"
 	"github.com/google/certificate-transparency-go/scanner"
-	"github.com/google/certificate-transparency-go/trillian/migrillian/election"
 	"github.com/google/certificate-transparency-go/util/exepool"
 
 	"github.com/google/trillian/merkle"
@@ -67,31 +66,17 @@ func initMetrics(mf monitoring.MetricFactory) {
 	})
 }
 
-// Options holds configuration for a Controller.
-type Options struct {
-	scanner.FetcherOptions
-	Submitters          int
-	BatchesPerSubmitter int
-}
-
 // Controller coordinates migration from a CT log to a Trillian tree.
 //
 // TODO(pavelkalinnikov):
-// - Coordinate multiple trees.
 // - Schedule a distributed fetch to increase throughput.
 // - Store CT STHs in Trillian or make this tool stateful on its own.
 // - Make fetching stateful to reduce master resigning aftermath.
 type Controller struct {
-	opts     Options
-	batches  chan scanner.EntryBatch
+	opts     scanner.FetcherOptions
 	ctClient *client.LogClient
 	plClient *PreorderedLogClient
-	ef       election.Factory
 	label    string
-
-	fxp *exepool.Pool // Fetchers execution Pool.
-	sxp *exepool.Pool // Submitters execution Pool.
-	// TODO(pavelkalinnikov): Share the pools between multiple trees.
 }
 
 // NewController creates a Controller configured by the passed in options, CT
@@ -100,27 +85,14 @@ type Controller struct {
 // The passed in MetricFactory is used to create per-tree metrics, and it
 // should be the same for all instances. However, it is used only once.
 func NewController(
-	opts Options,
+	opts scanner.FetcherOptions,
 	ctClient *client.LogClient,
 	plClient *PreorderedLogClient,
-	ef election.Factory,
 	mf monitoring.MetricFactory,
 ) *Controller {
 	initMetrics(mf)
 	l := strconv.FormatInt(plClient.tree.TreeId, 10)
-
-	// TODO(pavelkalinnikov): Pass the Pools through parameters.
-	// TODO(pavelkalinnikov): Don't panic.
-	fxp, err := exepool.New(opts.FetcherOptions.ParallelFetch, 0)
-	if err != nil {
-		panic(err)
-	}
-	sxp, err := exepool.New(opts.Submitters, opts.Submitters*opts.BatchesPerSubmitter)
-	if err != nil {
-		panic(err)
-	}
-
-	return &Controller{opts: opts, ctClient: ctClient, plClient: plClient, ef: ef, label: l, fxp: fxp, sxp: sxp}
+	return &Controller{opts: opts, ctClient: ctClient, plClient: plClient, label: l}
 }
 
 // RunWhenMaster is a master-elected version of Run method. It executes Run
@@ -128,10 +100,10 @@ func NewController(
 // instance stops being the master, Run is canceled. The method returns if a
 // severe error occurs, the passed in context is canceled, or fetching is
 // completed (in non-Continuous mode). Releases mastership when terminates.
-func (c *Controller) RunWhenMaster(ctx context.Context) error {
+func (c *Controller) RunWhenMaster(ctx context.Context, rt *Runtime) error {
 	treeID := c.plClient.tree.TreeId
 
-	el, err := c.ef.NewElection(ctx, treeID)
+	el, err := rt.ef.NewElection(ctx, treeID)
 	if err != nil {
 		return err
 	}
@@ -141,13 +113,6 @@ func (c *Controller) RunWhenMaster(ctx context.Context) error {
 			glog.Warningf("%d: Election.Close(): %v", treeID, err)
 		}
 	}(ctx)
-
-	c.fxp.Start()
-	c.sxp.Start()
-	defer func() {
-		c.fxp.Stop()
-		c.sxp.Stop()
-	}()
 
 	for {
 		if err := el.Await(ctx); err != nil {
@@ -166,7 +131,7 @@ func (c *Controller) RunWhenMaster(ctx context.Context) error {
 		metrics.masterRuns.Inc(c.label)
 
 		// Run while still master (or until an error).
-		err = c.Run(mctx)
+		err = c.Run(mctx, rt)
 		if ctx.Err() != nil {
 			// We have been externally canceled, so return the current error (which
 			// could be nil or a cancelation-related error).
@@ -187,7 +152,7 @@ func (c *Controller) RunWhenMaster(ctx context.Context) error {
 // migration process runs continuously trying to keep up with the target CT
 // log. Returns if an error occurs, the context is canceled, or all the entries
 // have been transferred (in non-Continuous mode).
-func (c *Controller) Run(ctx context.Context) error {
+func (c *Controller) Run(ctx context.Context, rt *Runtime) error {
 	treeID := c.plClient.tree.TreeId
 
 	root, err := c.plClient.getVerifiedRoot(ctx)
@@ -201,7 +166,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		glog.Warningf("%d: updated entry range to [%d, INF)", treeID, c.opts.StartIndex)
 	}
 
-	fetcher := scanner.NewFetcher(c.ctClient, &c.opts.FetcherOptions)
+	fetcher := scanner.NewFetcher(c.ctClient, &c.opts)
 	sth, err := fetcher.Prepare(ctx)
 	if err != nil {
 		return err
@@ -210,7 +175,7 @@ func (c *Controller) Run(ctx context.Context) error {
 		return err
 	}
 
-	sxpc, err := c.sxp.NewClient()
+	sxpc, err := rt.sxp.NewClient()
 	if err != nil {
 		return err
 	}
@@ -227,7 +192,7 @@ func (c *Controller) Run(ctx context.Context) error {
 			glog.Errorf("%d: failed to add submitter Job [%d, %d): %v", treeID, b.Start, end, err)
 		}
 	}
-	return fetcher.Run(ctx, c.fxp, handler)
+	return fetcher.Run(ctx, rt.fxp, handler)
 }
 
 // verifyConsistency checks that the provided verified Trillian root is
