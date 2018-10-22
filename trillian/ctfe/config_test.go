@@ -443,6 +443,23 @@ func TestValidateLogMultiConfig(t *testing.T) {
 			},
 		},
 		{
+			desc:    "duplicate-prefix-normalized",
+			wantErr: "duplicate prefix",
+			cfg: configpb.LogMultiConfig{
+				Backends: &configpb.LogBackendSet{
+					Backend: []*configpb.LogBackend{
+						{Name: "log1", BackendSpec: "testspec1"},
+					},
+				},
+				LogConfigs: &configpb.LogConfigSet{
+					Config: []*configpb.LogConfig{
+						{LogId: 1, Prefix: "pref//log1/", PrivateKey: privKey, LogBackendName: "log1"},
+						{LogId: 2, Prefix: "pref/log1", PrivateKey: privKey, LogBackendName: "log2"},
+					},
+				},
+			},
+		},
+		{
 			desc:    "references-undefined-backend",
 			wantErr: "references undefined backend",
 			cfg: configpb.LogMultiConfig{

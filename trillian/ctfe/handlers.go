@@ -25,9 +25,9 @@ import (
 	"fmt"
 	"io/ioutil"
 	"net/http"
+	"path"
 	"sort"
 	"strconv"
-	"strings"
 	"sync"
 	"time"
 
@@ -291,26 +291,21 @@ func newLogInfo(
 // Handlers returns a map from URL paths (with the given prefix) and AppHandler instances
 // to handle those entrypoints.
 func (li *logInfo) Handlers(prefix string) PathHandlers {
-	if !strings.HasPrefix(prefix, "/") {
-		prefix = "/" + prefix
-	}
-	prefix = strings.TrimRight(prefix, "/")
-
 	// Bind the logInfo instance to give an AppHandler instance for each endpoint.
 	ph := PathHandlers{
-		prefix + ct.AddChainPath:          AppHandler{Info: li, Handler: addChain, Name: AddChainName, Method: http.MethodPost},
-		prefix + ct.AddPreChainPath:       AppHandler{Info: li, Handler: addPreChain, Name: AddPreChainName, Method: http.MethodPost},
-		prefix + ct.GetSTHPath:            AppHandler{Info: li, Handler: getSTH, Name: GetSTHName, Method: http.MethodGet},
-		prefix + ct.GetSTHConsistencyPath: AppHandler{Info: li, Handler: getSTHConsistency, Name: GetSTHConsistencyName, Method: http.MethodGet},
-		prefix + ct.GetProofByHashPath:    AppHandler{Info: li, Handler: getProofByHash, Name: GetProofByHashName, Method: http.MethodGet},
-		prefix + ct.GetEntriesPath:        AppHandler{Info: li, Handler: getEntries, Name: GetEntriesName, Method: http.MethodGet},
-		prefix + ct.GetRootsPath:          AppHandler{Info: li, Handler: getRoots, Name: GetRootsName, Method: http.MethodGet},
-		prefix + ct.GetEntryAndProofPath:  AppHandler{Info: li, Handler: getEntryAndProof, Name: GetEntryAndProofName, Method: http.MethodGet},
+		path.Join(prefix, ct.AddChainPath):          AppHandler{Info: li, Handler: addChain, Name: AddChainName, Method: http.MethodPost},
+		path.Join(prefix, ct.AddPreChainPath):       AppHandler{Info: li, Handler: addPreChain, Name: AddPreChainName, Method: http.MethodPost},
+		path.Join(prefix, ct.GetSTHPath):            AppHandler{Info: li, Handler: getSTH, Name: GetSTHName, Method: http.MethodGet},
+		path.Join(prefix, ct.GetSTHConsistencyPath): AppHandler{Info: li, Handler: getSTHConsistency, Name: GetSTHConsistencyName, Method: http.MethodGet},
+		path.Join(prefix, ct.GetProofByHashPath):    AppHandler{Info: li, Handler: getProofByHash, Name: GetProofByHashName, Method: http.MethodGet},
+		path.Join(prefix, ct.GetEntriesPath):        AppHandler{Info: li, Handler: getEntries, Name: GetEntriesName, Method: http.MethodGet},
+		path.Join(prefix, ct.GetRootsPath):          AppHandler{Info: li, Handler: getRoots, Name: GetRootsName, Method: http.MethodGet},
+		path.Join(prefix, ct.GetEntryAndProofPath):  AppHandler{Info: li, Handler: getEntryAndProof, Name: GetEntryAndProofName, Method: http.MethodGet},
 	}
 	// Remove endpoints not provided by mirrors.
 	if li.instanceOpts.Validated.Config.IsMirror {
-		delete(ph, prefix+ct.AddChainPath)
-		delete(ph, prefix+ct.AddPreChainPath)
+		delete(ph, path.Join(prefix, ct.AddChainPath))
+		delete(ph, path.Join(prefix, ct.AddPreChainPath))
 	}
 
 	return ph

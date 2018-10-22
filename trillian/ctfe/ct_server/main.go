@@ -21,6 +21,7 @@ import (
 	"net/http"
 	"os"
 	"os/signal"
+	"path"
 	"strings"
 	"sync"
 	"syscall"
@@ -171,8 +172,9 @@ func main() {
 
 	// Register handlers for all the configured logs using the correct RPC
 	// client.
+	prefix := path.Clean(*handlerPrefix)
 	for _, c := range cfg.LogConfigs.Config {
-		if err := setupAndRegister(ctx, clientMap[c.LogBackendName], *rpcDeadline, c, corsMux, *handlerPrefix); err != nil {
+		if err := setupAndRegister(ctx, clientMap[c.LogBackendName], *rpcDeadline, c, corsMux, prefix); err != nil {
 			glog.Exitf("Failed to set up log instance for %+v: %v", cfg, err)
 		}
 	}
@@ -269,7 +271,7 @@ func awaitSignal(doneFn func()) {
 	doneFn()
 }
 
-func setupAndRegister(ctx context.Context, client trillian.TrillianLogClient, deadline time.Duration, cfg *configpb.LogConfig, mux *http.ServeMux, globalHandlerPrefix string) error {
+func setupAndRegister(ctx context.Context, client trillian.TrillianLogClient, deadline time.Duration, cfg *configpb.LogConfig, mux *http.ServeMux, prefix string) error {
 	vCfg, err := ctfe.ValidateLogConfig(cfg)
 	if err != nil {
 		return err
@@ -297,7 +299,7 @@ func setupAndRegister(ctx context.Context, client trillian.TrillianLogClient, de
 	// have an existing URL path that differs from the global one. For example
 	// if all new logs are served on "/logs/log/..." and a previously existing
 	// log is at "/log/..." this is now supported.
-	lhp := globalHandlerPrefix
+	lhp := prefix
 	if ohPrefix := cfg.OverrideHandlerPrefix; len(ohPrefix) > 0 {
 		glog.Infof("Log with prefix: %s is using a custom HandlerPrefix: %s", cfg.Prefix, ohPrefix)
 		lhp = "/" + strings.Trim(ohPrefix, "/")

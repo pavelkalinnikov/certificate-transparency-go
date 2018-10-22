@@ -19,6 +19,7 @@ import (
 	"errors"
 	"fmt"
 	"io/ioutil"
+	"path"
 	"time"
 
 	"github.com/golang/protobuf/proto"
@@ -33,6 +34,7 @@ import (
 // been successfully parsed as a result of validating it.
 type ValidatedLogConfig struct {
 	Config        *configpb.LogConfig
+	Prefix        string
 	PubKey        crypto.PublicKey
 	PrivKey       ptypes.DynamicAny
 	KeyUsages     []x509.ExtKeyUsage
@@ -107,8 +109,8 @@ func ValidateLogConfig(cfg *configpb.LogConfig) (*ValidatedLogConfig, error) {
 		return nil, errors.New("empty log ID")
 	}
 
+	vCfg := ValidatedLogConfig{Config: cfg, Prefix: path.Clean(cfg.Prefix)}
 	var err error
-	vCfg := ValidatedLogConfig{Config: cfg}
 
 	// Validate the public key.
 	if pubKey := cfg.PublicKey; pubKey != nil {
@@ -231,7 +233,7 @@ func BuildLogBackendMap(lbs *configpb.LogBackendSet) (LogBackendMap, error) {
 // 3. The log configs must all specify a log backend and each must be one of
 // those defined in the backend set.
 // 4. The prefixes of configured logs must all be distinct and must not be
-// empty.
+// empty or equal to "." (which is considered equivalent).
 // 5. The set of tree ids for each configured backend must be distinct.
 // 6. All log configs must be valid (see ValidateLogConfig).
 //
@@ -248,19 +250,20 @@ func ValidateLogMultiConfig(cfg *configpb.LogMultiConfig) (LogBackendMap, error)
 	logNameMap := make(map[string]bool)
 	logIDMap := make(map[string]bool)
 	for _, logCfg := range cfg.LogConfigs.Config {
-		if _, err := ValidateLogConfig(logCfg); err != nil {
+		vCfg, err := ValidateLogConfig(logCfg)
+		if err != nil {
 			return nil, fmt.Errorf("log config: %v: %v", err, logCfg)
 		}
-		if len(logCfg.Prefix) == 0 {
+		if p := vCfg.Prefix; p == "" || p == "." {
 			return nil, fmt.Errorf("log config: empty prefix: %v", logCfg)
 		}
-		if logNameMap[logCfg.Prefix] {
-			return nil, fmt.Errorf("log config: duplicate prefix: %s: %v", logCfg.Prefix, logCfg)
+		if p := vCfg.Prefix; logNameMap[p] {
+			return nil, fmt.Errorf("log config: duplicate prefix: %s: %v", p, logCfg)
 		}
 		if _, ok := backendMap[logCfg.LogBackendName]; !ok {
 			return nil, fmt.Errorf("log config: references undefined backend: %s: %v", logCfg.LogBackendName, logCfg)
 		}
-		logNameMap[logCfg.Prefix] = true
+		logNameMap[vCfg.Prefix] = true
 		logIDKey := fmt.Sprintf("%s-%d", logCfg.LogBackendName, logCfg.LogId)
 		if ok := logIDMap[logIDKey]; ok {
 			return nil, fmt.Errorf("log config: dup tree id: %d for: %v", logCfg.LogId, logCfg)
